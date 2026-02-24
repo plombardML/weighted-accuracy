@@ -5,27 +5,75 @@ import numpy as np
 from scipy import stats
 
 from WA_params import *
-
+from credit_utils import compute_credit_scoring_costs, df_UCC_calculator_credit
 from ranking_coefficients import standard_gamma_calc
 
-def beta_par_calculator(N_tot, C_frac):
+
+def M_calculator(C_frac):
+    coeff = (1 - C_frac) / N_tot
+    for k in range(N_tot - 1):
+        M = coeff * sum([R_rescaled_list[a] for a in range(k, N_tot)]) / (1- coeff * k)
+        if M < R_rescaled_list[0]:
+            return P_eff * R_avg * (1 - C_frac)
+        elif R_rescaled_list[k] <= M <= R_rescaled_list[k + 1]:
+            return M
+    raise ValueError("M_calculator didn't find M to respect the positive bound for unit cost of a false negative")
+                     
+
+def df_UCC_calculator(C_frac, P, N, use_case):
+    """Create pandas Dataframe with Unit Classification Costs
+    
+    Args:
+        C_frac (float): fraction C_FN / (C_FN + C_FP)
+        P (float): fraction of positive examples
+        N (float): fraction of negative examples
+        use_case (string): Which use case ('churn' or 'credit')
+        
+    Returns:
+        pandas Dataframe: Dataframe with the example-dependent Unit Classification Costs for the selected use case and parameters
+    """
+
+    if use_case == 'churn':
+        # M = P_eff * R_avg * (1 - C_frac)
+        M = M_calculator(C_frac)
+        C_FP_list = [M] * (N + P)
+        C_FN_list = [max(0, R * P_eff - M) for R in R_list]
+        return pd.DataFrame({'C_FP': C_FP_list, 'C_FN': C_FN_list})
+
+    elif use_case == 'credit':
+        income_col, debt_col, target_col = cs_col_map['income'], cs_col_map['debt'], cs_col_map['target']
+        cs_costs_df = compute_credit_scoring_costs(df_credit, income_col, debt_col, target_col, cs_params)
+        return df_UCC_calculator_credit(cs_costs_df, C_frac=C_frac, P=P, N=N)
+    else:
+        raise ValueError('Unexpected use_case', use_case)
+
+
+def beta_par_calculator(df_UCC):
     """Calculate Beta distribution parameters for informed H and EWA metrics.
     
     Args:
-        N_tot (int): Total number of samples
-        C_frac (float): Cost fraction parameter
+        c_mean (float): mean of the u(c) distribution
+        c_var (float): variance of the u(c) distribution
         
     Returns:
-        tuple: Beta distribution parameters (a, b)
+        tuple: Beta distribution parameters (alpha, beta)
     """
-    a_min = 2
-    c_avg = 1 - C_frac
-    M = P_eff * R_avg * (1 - C_frac)
-    sigma_c = M * sigma_R / (math.sqrt(N_tot) * P_eff * R_avg ** 2)
-    a = (1 - c_avg) * c_avg ** 2 / sigma_c - c_avg
-    a = max(a, a_min)
-    b = a / c_avg - a
-    return a, b
+    alpha_min = 10 ** (-3)
+    alpha_max = 10 ** 3
+    beta_min = 10 ** (-3)
+    beta_max = 10 ** 3
+    
+    c_list = df_UCC['C_FP'] / (df_UCC['C_FP'] + df_UCC['C_FN'])
+
+    c_mean = np.mean(c_list)
+    c_var = np.var(c_list)
+    
+    alpha = (1 - c_mean) * c_mean ** 2 / c_var - c_mean
+    beta = alpha / c_mean - alpha
+    alpha = np.clip(alpha, alpha_min, alpha_max)
+    beta = np.clip(beta, beta_min, beta_max)
+    
+    return alpha, beta
 
 
 class Metrics:
@@ -111,6 +159,8 @@ class Dataset:
         self.FP = FP
         self.TN = self.N - FP
         self.TP = self.P - FN
+        
+        # print(f'FN: {FN}, FP: {FP}, TN: {self.TN}, TP: {self.TP} **** N: {self.N}, P: {self.P}, N_tot: {N_tot}')
         self.prec = self.TP / (self.TP + self.FP + epsilon)
         self.rec = self.TP / self.P
         self.spec = self.TN / self.N
@@ -225,19 +275,19 @@ class Dataset:
         """
         return self.TP, self.FP, self.TN, self.FN
 
-    def get_H_complete(self, a=2, b=2, num_points=1000):
+    def get_H_complete(self, alpha=2, beta=2, num_points=1000):
         """Calculate H-measure using Beta distribution integration.
         
         Args:
-            a (float): Beta distribution alpha parameter
-            b (float): Beta distribution beta parameter
+            alpha (float): Beta distribution alpha parameter
+            beta (float): Beta distribution beta parameter
             num_points (int): Number of integration points
             
         Returns:
             float: H-measure value
         """
         c_vals = np.linspace(0, 1, num_points)[1:-1]
-        u_c = stats.beta.pdf(c_vals, a, b)  # Beta(a, b) distribution
+        u_c = stats.beta.pdf(c_vals, alpha, beta)  # Beta(a, b) distribution
 
         # Evaluate TCC and TCC_max across c_vals
         TCC_vals_S = self.FP * c_vals + self.FN * (1 - c_vals)
@@ -253,19 +303,19 @@ class Dataset:
         return 1 - (num / den)
 
     
-    def get_EWA(self, a=2, b=2, num_points=1000):
+    def get_EWA(self, alpha=2, beta=2, num_points=1000):
         """Calculate Expected Weighted Accuracy using Beta distribution integration.
         
         Args:
-            a (float): Beta distribution alpha parameter
-            b (float): Beta distribution beta parameter
+            alpha (float): Beta distribution alpha parameter
+            beta (float): Beta distribution beta parameter
             num_points (int): Number of integration points
             
         Returns:
             float: EWA value
         """
         c_vals = np.linspace(0, 1, num_points)[1:-1]
-        u_c = stats.beta.pdf(c_vals, a, b)  # Beta(a, b) distribution
+        u_c = stats.beta.pdf(c_vals, alpha, beta)  # Beta(a, b) distribution
 
         # Evaluate WA across c_vals (w = 1 - c)
         num_list = self.TP * (1 - c_vals) + self.TN * c_vals
@@ -305,17 +355,14 @@ def compare_with_TCC(input_list, cost_list, metric='', inverse=True, weight=Fals
     return pd.DataFrame({'metric': [metric], 's': [s]})
 
 
-
-
-def generate_metrics_and_compare(D, N, P, M, R_list, n_samples=10, weight=False):
+def generate_metrics_and_compare(D, N, P, df_UCC, n_samples=10, weight=False):
     """Generate metrics across different prediction scenarios and compare with TCC.
     
     Args:
         D (Dataset): Dataset object
         N (int): Number of negative samples
         P (int): Number of positive samples
-        M (float): Cost multiplier
-        R_list (list): List of cost values
+        df_UCC (pandas Dataframe): Dataframe with the UCCs for each example
         n_samples (int): Number of sampling iterations
         weight (bool): Whether to use weighted correlation
         
@@ -326,16 +373,19 @@ def generate_metrics_and_compare(D, N, P, M, R_list, n_samples=10, weight=False)
     for s in range(n_samples):
         Metric = Metrics()    
         indeces_pos = rng_utils.choice(range(D.N_tot), P, replace=False)
+        df_UCC['is_plus'] = [True if i in indeces_pos else False for i in range(N_tot) ]
         for N_pred_pos in range(0, D.N_tot + 1):
             # indices of predicted positives
             indeces_pred_pos = rng_utils.choice(range(D.N_tot), N_pred_pos, replace=False)
-            cost_FN_list = [R_list[i] for i in indeces_pos if i not in indeces_pred_pos]
+            df_UCC['is_pred_plus'] = [True if i in indeces_pred_pos else False for i in range(N_tot) ]            
+            cost_FN_list = df_UCC[df_UCC.is_plus & pd.Series([not x for x in df_UCC.is_pred_plus])]['C_FN']
+            cost_FP_list = df_UCC[df_UCC.is_pred_plus & pd.Series([not x for x in df_UCC.is_plus])]['C_FP']
             FN = len(cost_FN_list)
-            FP = len([i for i in indeces_pred_pos if i not in indeces_pos])
+            FP = len(cost_FP_list)
             TN = N - FP
             TP = P - FN
         
-            TCC = M * (FP - FN) + P_eff * sum(cost_FN_list)
+            TCC = sum(cost_FN_list) + sum(cost_FP_list)
 
             D.set_confusion_matrix(FN=FN, FP=FP)
             Metric.append_to_list('precision', D.prec)
@@ -360,9 +410,9 @@ def generate_metrics_and_compare(D, N, P, M, R_list, n_samples=10, weight=False)
             Metric.append_to_list('WA', D.WA)
             Metric.append_to_list('H', D.get_H_complete())
             
-            a, b = beta_par_calculator(N_tot=D.N_tot, C_frac=D.w_cost)
-            Metric.append_to_list('H informed', D.get_H_complete(a=a, b=b))
-            Metric.append_to_list('EWA', D.get_EWA(a=a, b=b))
+            alpha, beta = beta_par_calculator(df_UCC=df_UCC)
+            Metric.append_to_list('H informed', D.get_H_complete(alpha=alpha, beta=beta))
+            Metric.append_to_list('EWA', D.get_EWA(alpha=alpha, beta=beta))
             
             Metric.append_to_list('G-mean', D.G_mean)
             Metric.append_to_list('TCC', TCC)
@@ -388,11 +438,12 @@ def generate_metrics_and_compare(D, N, P, M, R_list, n_samples=10, weight=False)
     return dic_avg, dic_std
 
 
-def calculator(weight):
+def corr_matrices_calculator(weight, use_case):
     """Calculate correlation heatmap data for different dataset configurations.
     
     Args:
         weight (bool): Whether to use weighted correlation calculations
+        use_case (string): Which use case ('churn' or 'credit')
         
     Returns:
         tuple: (average_metrics_dataframes, std_metrics_dataframes)
@@ -401,10 +452,9 @@ def calculator(weight):
     metric_data_avg = {m: [] for m in Metric.metrics_dic.keys()}  
     metric_data_std = {m: [] for m in Metric.metrics_dic.keys()}  
     
-    print(f'N_tot: {N_tot}, n_samples: {n_samples}')
-    print(f'frac_plus_list: {frac_plus_list}')
-    print(f'C_frac_list: {C_frac_list}')
-    # R_list = rng_utils.choice(RCV_list, N_tot, replace=False)
+    # print(f'N_tot: {N_tot}, n_samples: {n_samples}')
+    # print(f'frac_plus_list: {frac_plus_list}')
+    # print(f'C_frac_list: {C_frac_list}')
 
     for frac_plus in frac_plus_list:
         P = int(round(N_tot * frac_plus))
@@ -413,29 +463,36 @@ def calculator(weight):
             print(f'frac_plus={frac_plus}, C_frac={C_frac}        ', end='\r')
             D = Dataset(P=P, N=N)
             D.set_cost(C_FN=C_frac / (1 - C_frac), C_FP=1)
-            M = P_eff * R_avg * (1 - C_frac)
-            dic_avg, dic_std = generate_metrics_and_compare(D, N, P, M, R_list=R_list, n_samples=n_samples, weight=weight)
-            for m in Metric.metrics_dic.keys():
-                if m in dic_avg.keys():  
-                    metric_data_avg[m].append((P / N_tot, C_frac, magnifying_factor * dic_avg[m]))  
-                    metric_data_std[m].append((P / N_tot, C_frac, magnifying_factor * dic_std[m]))      
+            df_UCC = df_UCC_calculator(C_frac, P, N, use_case)
+            if not isinstance(df_UCC, type(None)):
+                dic_avg, dic_std = generate_metrics_and_compare(D, N, P, df_UCC, n_samples=n_samples, weight=weight)
+                for m in Metric.metrics_dic.keys():
+                    if m in dic_avg.keys():  
+                        metric_data_avg[m].append((P / N_tot, C_frac, magnifying_factor * dic_avg[m]))  
+                        metric_data_std[m].append((P / N_tot, C_frac, magnifying_factor * dic_std[m]))
+            else: # missing value (because Lgd is negative)
+                 for m in Metric.metrics_dic.keys():
+                    if m in dic_avg.keys():  
+                        metric_data_avg[m].append((P / N_tot, C_frac, None))  
+                        metric_data_std[m].append((P / N_tot, C_frac, None))               
     
     metric_dfs_avg = {m: pd.DataFrame(data, columns=['P', 'cost', 'value']) for m, data in metric_data_avg.items()}
     metric_dfs_std = {m: pd.DataFrame(data, columns=['P', 'cost', 'value']) for m, data in metric_data_std.items()}
+    
+    os.makedirs(out_path_0, exist_ok=True)
+    os.makedirs(f'{out_path_0}/{use_case}', exist_ok=True)
 
-    filename = f'{out_path_0}/weight_{weight}/avg/'
+    filename = f'{out_path_0}/{use_case}/weight_{weight}/avg/'
     os.makedirs(filename, exist_ok=True)
     for k in metric_data_avg.keys():
         metric_dfs_avg[k].to_csv(filename + f'{k}.csv')
     
-    filename = f'{out_path_0}/weight_{weight}/std/'
+    filename = f'{out_path_0}/{use_case}/weight_{weight}/std/'
     os.makedirs(filename, exist_ok=True)
     for k in metric_data_std.keys():
         metric_dfs_std[k].to_csv(filename + f'{k}.csv')
     
-    os.makedirs(out_path_0, exist_ok=True)
-    
-    with open(f'{out_path_0}/params.json', 'w') as f:
+    with open(f'{out_path_0}/{use_case}/params.json', 'w') as f:
         json.dump(params, f)
     
     return metric_dfs_avg, metric_dfs_std

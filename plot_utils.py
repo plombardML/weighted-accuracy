@@ -7,15 +7,15 @@ import seaborn as sns
 
 from WA_params import out_path_0, metrics_of_interests, magnifying_factor, plot_n_cols, plot_n_rows
 
-def read_data(weight):
-    path = f'{out_path_0}/weight_{weight}/avg'
+def read_data(weight, use_case):
+    path = f'{out_path_0}/{use_case}/weight_{weight}/avg'
     filenames = os.listdir(path)
     metric_data_avg = {}
     for filename in filenames:
         k = filename[:-4]
         metric_data_avg[k] = pd.read_csv(f'{path}/{filename}')
         
-    path = f'{out_path_0}/weight_{weight}/std'
+    path = f'{out_path_0}/{use_case}/weight_{weight}/std'
     filenames = os.listdir(path)
     metric_data_std = {}
     for filename in filenames:
