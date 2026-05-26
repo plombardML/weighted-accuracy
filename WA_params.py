@@ -10,9 +10,12 @@ rng_utils = np.random.default_rng(142)
 ####
 # sampling params
 n_samples = 100
-N_tot =200
+N_tot = 200
 C_frac_list = [0.01] + [i / 10 for i in range(1, 10)] + [0.99]
 frac_plus_list = [0.01] + [i / 10 for i in range(1, 10)] + [0.99]
+
+# C_frac_list = [0.01] + [i / 10 for i in range(1, 10)] + [0.99]
+# frac_plus_list = [0.01] + [i / 10 for i in range(1, 10)] + [0.99]
 
 
 
@@ -33,6 +36,49 @@ P_eff = 0.25 # probability that the retention measure is effective
 R_avg = np.mean(R_list)
 sigma_R = np.std(R_list)
 R_rescaled_list = [P_eff * x for x in sorted(R_list)]
+
+
+#########
+# CHURN WITH EXTREME STATISTICS
+
+massive_customers_fraction_lst = [0.01, 0.02, 0.05, 0.1, 0.2]
+revenue_fraction_lst = [0.2, 0.4, 0.6, 0.8, 0.99]
+n_mcfl = len(massive_customers_fraction_lst)
+n_rfl = len(revenue_fraction_lst)
+
+R_list_extreme_array = [[None for i in range(n_mcfl)] for j in range(n_rfl)]
+R_avg_extreme_array = [[None for i in range(n_mcfl)] for j in range(n_rfl)]
+sigma_R_extreme_array = [[None for i in range(n_mcfl)] for j in range(n_rfl)]
+R_rescaled_list_extreme_array = [[None for i in range(n_mcfl)] for j in range(n_rfl)]
+
+R_list_sorted = sorted(R_list, reverse=True)
+for i in range(n_mcfl):
+    for j in range(n_rfl):
+        massive_customers_fraction = massive_customers_fraction_lst[i]
+        revenue_fraction = revenue_fraction_lst[j]
+        
+        massive_customers_number = int(round(N_tot * massive_customers_fraction))
+        revenue_fraction_others = 1 - revenue_fraction
+        R_list_massive = R_list_sorted[:massive_customers_number]
+        R_list_others = R_list_sorted[massive_customers_number:]
+        
+        R_total = sum(R_list_others) / revenue_fraction_others
+        R_massive_customers = R_total * revenue_fraction
+        R_massive_customers_initial = sum(R_list_massive)
+        R_factor_massive_customers = R_massive_customers / R_massive_customers_initial
+        R_list_massive = [r * R_factor_massive_customers for r in R_list_massive]        
+        
+        R_list_extreme = np.array(R_list_massive + R_list_others)
+        
+        # cost params
+        R_avg_extreme = np.mean(R_list_extreme)
+        sigma_R_extreme = np.std(R_list_extreme)
+        R_rescaled_list_extreme = [P_eff * x for x in sorted(R_list_extreme)]
+
+        R_list_extreme_array[i][j] = R_list_extreme
+        R_avg_extreme_array[i][j] = R_avg_extreme
+        sigma_R_extreme_array[i][j] = sigma_R_extreme
+        R_rescaled_list_extreme_array[i][j] = R_rescaled_list_extreme
 
 
 #########
@@ -92,6 +138,7 @@ metrics_of_interests = [
     'NPV',
     'P4',
     'G-mean',
+    'jaccard',
     'F1',
     'recall',
     'B-ROC',
@@ -99,5 +146,5 @@ metrics_of_interests = [
     'ACD',
     'WA',   
     'H informed',
-    'EWA'    
+    'EWA'
 ]

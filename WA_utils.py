@@ -9,25 +9,29 @@ from credit_utils import compute_credit_scoring_costs, df_UCC_calculator_credit
 from ranking_coefficients import standard_gamma_calc
 
 
-def M_calculator(C_frac):
+def M_calculator(C_frac, use_case,i=None, j=None):
+    if use_case == 'churn':
+        lst = R_rescaled_list
+    elif use_case == 'churn_extreme':
+        lst = R_rescaled_list_extreme_array[i][j]
     coeff = (1 - C_frac) / N_tot
     for k in range(N_tot - 1):
-        M = coeff * sum([R_rescaled_list[a] for a in range(k, N_tot)]) / (1- coeff * k)
-        if M < R_rescaled_list[0]:
+        M = coeff * sum([lst[a] for a in range(k, N_tot)]) / (1- coeff * k)
+        if M < lst[0]:
             return P_eff * R_avg * (1 - C_frac)
-        elif R_rescaled_list[k] <= M <= R_rescaled_list[k + 1]:
+        elif lst[k] <= M <= lst[k + 1]:
             return M
     raise ValueError("M_calculator didn't find M to respect the positive bound for unit cost of a false negative")
                      
 
-def df_UCC_calculator(C_frac, P, N, use_case):
+def df_UCC_calculator(C_frac, P, N, use_case, i=None, j=None):
     """Create pandas Dataframe with Unit Classification Costs
     
     Args:
         C_frac (float): fraction C_FN / (C_FN + C_FP)
         P (float): fraction of positive examples
         N (float): fraction of negative examples
-        use_case (string): Which use case ('churn' or 'credit')
+        use_case (string): Which use case ('churn', 'churn_extreme', or 'credit')
         
     Returns:
         pandas Dataframe: Dataframe with the example-dependent Unit Classification Costs for the selected use case and parameters
@@ -35,9 +39,14 @@ def df_UCC_calculator(C_frac, P, N, use_case):
 
     if use_case == 'churn':
         # M = P_eff * R_avg * (1 - C_frac)
-        M = M_calculator(C_frac)
+        M = M_calculator(C_frac, use_case)
         C_FP_list = [M] * (N + P)
         C_FN_list = [max(0, R * P_eff - M) for R in R_list]
+        return pd.DataFrame({'C_FP': C_FP_list, 'C_FN': C_FN_list})
+    elif use_case == 'churn_extreme':
+        M = M_calculator(C_frac, use_case, i, j)
+        C_FP_list = [M] * (N + P)
+        C_FN_list = [max(0, R * P_eff - M) for R in R_list_extreme_array[i][j]]
         return pd.DataFrame({'C_FP': C_FP_list, 'C_FN': C_FN_list})
 
     elif use_case == 'credit':
@@ -52,8 +61,7 @@ def beta_par_calculator(df_UCC):
     """Calculate Beta distribution parameters for informed H and EWA metrics.
     
     Args:
-        c_mean (float): mean of the u(c) distribution
-        c_var (float): variance of the u(c) distribution
+        df_UCC (pandas DataFrame): DataFrame containing unit classification costs
         
     Returns:
         tuple: Beta distribution parameters (alpha, beta)
@@ -168,7 +176,8 @@ class Dataset:
         self.accuracy = (self.TP + self.TN) / (self.N_tot)
         self.F1 = 2 * self.TP / (2 * self.TP + self.FP + self.FN)       
         self.kappa = (2 * (self.TP * self.TN - self.FN * self.FP) / ((self.TP + self.FP) * self.N + self.P * (self.FN + self.TN)) + epsilon)
- 
+        self.jaccard = self.TP / (self.P + self.FP)
+        
         # P4 metric
         self.P4 = (4*self.TP*self.TN) / (4*self.TP*self.TN + (self.TP+self.TN)*(self.FP+self.FN) + epsilon)
        
@@ -372,12 +381,12 @@ def generate_metrics_and_compare(D, N, P, df_UCC, n_samples=10, weight=False):
     df_list_by_sample = []
     for s in range(n_samples):
         Metric = Metrics()    
-        indeces_pos = rng_utils.choice(range(D.N_tot), P, replace=False)
-        df_UCC['is_plus'] = [True if i in indeces_pos else False for i in range(N_tot) ]
+        indices_pos = rng_utils.choice(range(D.N_tot), P, replace=False)
+        df_UCC['is_plus'] = [True if i in indices_pos else False for i in range(N_tot) ]
         for N_pred_pos in range(0, D.N_tot + 1):
             # indices of predicted positives
-            indeces_pred_pos = rng_utils.choice(range(D.N_tot), N_pred_pos, replace=False)
-            df_UCC['is_pred_plus'] = [True if i in indeces_pred_pos else False for i in range(N_tot) ]            
+            indices_pred_pos = rng_utils.choice(range(D.N_tot), N_pred_pos, replace=False)
+            df_UCC['is_pred_plus'] = [True if i in indices_pred_pos else False for i in range(N_tot) ]            
             cost_FN_list = df_UCC[df_UCC.is_plus & pd.Series([not x for x in df_UCC.is_pred_plus])]['C_FN']
             cost_FP_list = df_UCC[df_UCC.is_pred_plus & pd.Series([not x for x in df_UCC.is_plus])]['C_FP']
             FN = len(cost_FN_list)
@@ -395,6 +404,7 @@ def generate_metrics_and_compare(D, N, P, df_UCC, n_samples=10, weight=False):
             Metric.append_to_list('accuracy', D.accuracy)
             Metric.append_to_list('F1', D.F1)
             Metric.append_to_list('kappa', D.kappa)
+            Metric.append_to_list('jaccard', D.jaccard)
             Metric.append_to_list('P4', D.P4)
             Metric.append_to_list('ROC-AUC', D.ROC_AUC)
             Metric.append_to_list('CBA', D.CBA)
@@ -428,14 +438,14 @@ def generate_metrics_and_compare(D, N, P, df_UCC, n_samples=10, weight=False):
         df = pd.concat(df_list)
         df_list_by_sample.append(df)
         
-    dic_avg = {}
-    dic_std = {}
+    corr_avg  = {}
+    corr_std = {}
     for metric in Metric.metrics_dic.keys():
         corr_list = [df_m[df_m.metric == metric]['s'][0] for df_m in df_list_by_sample]
-        dic_avg[metric] = np.mean(corr_list)
-        dic_std[metric] = np.std(corr_list)
+        corr_avg [metric] = np.mean(corr_list)
+        corr_std[metric] = np.std(corr_list)
     
-    return dic_avg, dic_std
+    return corr_avg , corr_std
 
 
 def corr_matrices_calculator(weight, use_case):
@@ -443,54 +453,92 @@ def corr_matrices_calculator(weight, use_case):
     
     Args:
         weight (bool): Whether to use weighted correlation calculations
-        use_case (string): Which use case ('churn' or 'credit')
+        use_case (string): Which use case ('churn', 'churn_extreme', or 'credit')
         
     Returns:
         tuple: (average_metrics_dataframes, std_metrics_dataframes)
     """
     Metric = Metrics()
-    metric_data_avg = {m: [] for m in Metric.metrics_dic.keys()}  
-    metric_data_std = {m: [] for m in Metric.metrics_dic.keys()}  
-    
-    # print(f'N_tot: {N_tot}, n_samples: {n_samples}')
-    # print(f'frac_plus_list: {frac_plus_list}')
-    # print(f'C_frac_list: {C_frac_list}')
+
+    if use_case != 'churn_extreme':
+        metric_data_avg = {m: [] for m in Metric.metrics_dic.keys()}
+        metric_data_std = {m: [] for m in Metric.metrics_dic.keys()}
+    else:
+        metric_data_avg = {(i, j): [] for i in range(n_mcfl) for j in range(n_rfl)}
+        metric_data_std = {(i, j): [] for i in range(n_mcfl) for j in range(n_rfl)}
 
     for frac_plus in frac_plus_list:
         P = int(round(N_tot * frac_plus))
         N = N_tot - P
-        for C_frac in C_frac_list:  
+        for C_frac in C_frac_list:
             print(f'frac_plus={frac_plus}, C_frac={C_frac}        ', end='\r')
             D = Dataset(P=P, N=N)
             D.set_cost(C_FN=C_frac / (1 - C_frac), C_FP=1)
-            df_UCC = df_UCC_calculator(C_frac, P, N, use_case)
-            if not isinstance(df_UCC, type(None)):
-                dic_avg, dic_std = generate_metrics_and_compare(D, N, P, df_UCC, n_samples=n_samples, weight=weight)
-                for m in Metric.metrics_dic.keys():
-                    if m in dic_avg.keys():  
-                        metric_data_avg[m].append((P / N_tot, C_frac, magnifying_factor * dic_avg[m]))  
-                        metric_data_std[m].append((P / N_tot, C_frac, magnifying_factor * dic_std[m]))
-            else: # missing value (because Lgd is negative)
-                 for m in Metric.metrics_dic.keys():
-                    if m in dic_avg.keys():  
-                        metric_data_avg[m].append((P / N_tot, C_frac, None))  
-                        metric_data_std[m].append((P / N_tot, C_frac, None))               
-    
-    metric_dfs_avg = {m: pd.DataFrame(data, columns=['P', 'cost', 'value']) for m, data in metric_data_avg.items()}
-    metric_dfs_std = {m: pd.DataFrame(data, columns=['P', 'cost', 'value']) for m, data in metric_data_std.items()}
-    
+            if use_case != 'churn_extreme':
+                df_UCC = df_UCC_calculator(C_frac, P, N, use_case)
+                if not isinstance(df_UCC, type(None)):
+                    corr_avg , corr_std = generate_metrics_and_compare(D, N, P, df_UCC, n_samples=n_samples, weight=weight)
+                    for m in Metric.metrics_dic.keys():
+                        if m in corr_avg .keys():
+                            metric_data_avg[m].append((P / N_tot, C_frac, magnifying_factor * corr_avg [m]))
+                            metric_data_std[m].append((P / N_tot, C_frac, magnifying_factor * corr_std[m]))
+                else:
+                    for m in Metric.metrics_dic.keys():
+                        if m in corr_avg .keys():
+                            metric_data_avg[m].append((P / N_tot, C_frac, None))
+                            metric_data_std[m].append((P / N_tot, C_frac, None))
+            else:
+                for i in range(n_mcfl):
+                    for j in range(n_rfl):
+                        df_UCC = df_UCC_calculator(C_frac, P, N, use_case, i, j)
+                        if not isinstance(df_UCC, type(None)):
+                            corr_list = []
+                            for _ in range(n_samples):
+                                wa_list, tcc_list = [], []
+                                indices_pos = rng_utils.choice(range(D.N_tot), P, replace=False)
+                                df_UCC['is_plus'] = [True if idx in indices_pos else False for idx in range(N_tot)]
+                                for N_pred_pos in range(0, D.N_tot + 1):
+                                    indices_pred_pos = rng_utils.choice(range(D.N_tot), N_pred_pos, replace=False)
+                                    df_UCC['is_pred_plus'] = [True if idx in indices_pred_pos else False for idx in range(N_tot)]
+                                    cost_FN_list = df_UCC[~df_UCC.is_pred_plus & df_UCC.is_plus]['C_FN']
+                                    cost_FP_list = df_UCC[df_UCC.is_pred_plus & ~df_UCC.is_plus]['C_FP']
+                                    FP = len(cost_FP_list)
+                                    FN = len(cost_FN_list)
+                                    D.set_confusion_matrix(FN=FN, FP=FP)
+                                    D.set_w()
+                                    wa_list.append(D.WA)
+                                    tcc_list.append(sum(cost_FN_list) + sum(cost_FP_list))
+                                
+                                corr_df = compare_with_TCC(input_list=wa_list, cost_list=tcc_list, metric='WA', inverse=True, weight=weight)
+                                corr_list.append(corr_df['s'].iloc[0])
+                            wa_avg = np.mean(corr_list)
+                            wa_std = np.std(corr_list)
+                            metric_data_avg[(i, j)].append((P / N_tot, C_frac, magnifying_factor * wa_avg))
+                            metric_data_std[(i, j)].append((P / N_tot, C_frac, magnifying_factor * wa_std))
+                        else:
+                            metric_data_avg[(i, j)].append((P / N_tot, C_frac, None))
+                            metric_data_std[(i, j)].append((P / N_tot, C_frac, None))
+
+    #  Double branch for same operation in case of different handling
+    if use_case != 'churn_extreme':
+        metric_dfs_avg = {m: pd.DataFrame(data, columns=['P', 'cost', 'value']) for m, data in metric_data_avg.items()}
+        metric_dfs_std = {m: pd.DataFrame(data, columns=['P', 'cost', 'value']) for m, data in metric_data_std.items()}
+    else:
+        metric_dfs_avg = {k: pd.DataFrame(data, columns=['P', 'cost', 'value']) for k, data in metric_data_avg.items()}
+        metric_dfs_std = {k: pd.DataFrame(data, columns=['P', 'cost', 'value']) for k, data in metric_data_std.items()}
+
     os.makedirs(out_path_0, exist_ok=True)
     os.makedirs(f'{out_path_0}/{use_case}', exist_ok=True)
 
-    filename = f'{out_path_0}/{use_case}/weight_{weight}/avg/'
-    os.makedirs(filename, exist_ok=True)
-    for k in metric_data_avg.keys():
-        metric_dfs_avg[k].to_csv(filename + f'{k}.csv')
+    avg_path = f'{out_path_0}/{use_case}/weight_{weight}/avg/'
+    os.makedirs(avg_path, exist_ok=True)
+    for k in metric_dfs_avg.keys():
+        metric_dfs_avg[k].to_csv(avg_path + f'{k}.csv')
     
-    filename = f'{out_path_0}/{use_case}/weight_{weight}/std/'
-    os.makedirs(filename, exist_ok=True)
-    for k in metric_data_std.keys():
-        metric_dfs_std[k].to_csv(filename + f'{k}.csv')
+    std_path = f'{out_path_0}/{use_case}/weight_{weight}/std/'
+    os.makedirs(std_path, exist_ok=True)
+    for k in metric_dfs_std.keys():
+        metric_dfs_std[k].to_csv(std_path + f'{k}.csv')
     
     with open(f'{out_path_0}/{use_case}/params.json', 'w') as f:
         json.dump(params, f)
